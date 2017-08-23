@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import __version__ as faust_version
 from . import transport
 from .actors import Actor, ActorFun, ActorT, ReplyConsumer, SinkT
+from .channels import Channel, ChannelT
 from .exceptions import ImproperlyConfigured
 from .sensors import Monitor, SensorDelegate
 from .streams import current_event
@@ -33,7 +34,6 @@ from .types.transports import ConsumerT, ProducerT, TPorTopicSet, TransportT
 from .types.windows import WindowT
 from .utils.aiter import aiter
 from .utils.compat import OrderedDict
-from .utils.futures import maybe_async
 from .utils.imports import SymbolArg, symbol_by_name
 from .utils.logging import get_logger
 from .utils.objects import Unordered, cached_property
@@ -325,8 +325,19 @@ class App(AppT, ServiceProxy):
             config=config,
         )
 
+    def channel(self, *,
+                key_type: ModelArg = None,
+                value_type: ModelArg = None,
+                loop: asyncio.AbstractEventLoop = None) -> ChannelT:
+        return Channel(
+            self,
+            key_type=key_type,
+            value_type=value_type,
+            loop=loop,
+        )
+
     def actor(self,
-              topic: Union[str, TopicT] = None,
+              channel: Union[str, ChannelT] = None,
               *,
               name: str = None,
               concurrency: int = 1,
@@ -336,7 +347,7 @@ class App(AppT, ServiceProxy):
                 fun,
                 name=name,
                 app=self,
-                topic=topic,
+                channel=channel,
                 concurrency=concurrency,
                 sink=sink,
                 on_error=self._on_actor_error,
@@ -374,7 +385,7 @@ class App(AppT, ServiceProxy):
                coroutine: StreamCoroutine = None,
                beacon: NodeT = None,
                **kwargs: Any) -> StreamT:
-        """Create new stream from topic.
+        """Create new stream from channel.
 
         Arguments:
             channel: Async iterable to stream over.
@@ -463,7 +474,7 @@ class App(AppT, ServiceProxy):
 
     async def maybe_attach(
             self,
-            topic: Union[TopicT, str],
+            channel: Union[ChannelT, str],
             key: K = None,
             value: V = None,
             partition: int = None,
@@ -475,14 +486,14 @@ class App(AppT, ServiceProxy):
             event = current_event()
             if event is not None:
                 return event.attach(
-                    topic, key, value,
+                    channel, key, value,
                     partition=partition,
                     key_serializer=key_serializer,
                     value_serializer=value_serializer,
                     callback=callback,
                 )
         return await self.send(
-            topic, key, value,
+            channel, key, value,
             partition=partition,
             key_serializer=key_serializer,
             value_serializer=value_serializer,
@@ -491,7 +502,7 @@ class App(AppT, ServiceProxy):
 
     async def send(
             self,
-            topic: Union[TopicT, str],
+            channel: Union[ChannelT, str],
             key: K = None,
             value: V = None,
             partition: int = None,
@@ -501,7 +512,7 @@ class App(AppT, ServiceProxy):
         """Send event to stream.
 
         Arguments:
-            topic (Union[TopicT, str]): Topic to send event to.
+            channel (Union[ChannelT, str]): Channel to send event to.
             key (K): Message key.
             value (V): Message value.
             partition (int): Specific partition to send to.
@@ -511,27 +522,12 @@ class App(AppT, ServiceProxy):
             value_serializer (CodecArg): Serializer to use
                 only when value is not a model.
         """
-        strtopic: str
-        if isinstance(topic, TopicT):
-            # ridiculous casting
-            topictopic = cast(TopicT, topic)
-            strtopic = topictopic.topics[0]
-        else:
-            strtopic = cast(str, topic)
-
-        fut = FutureMessage(PendingMessage(
-            strtopic,
-            (await self.serializers.dumps_key(
-                strtopic, key, key_serializer)
-             if key is not None else None),
-            (await self.serializers.dumps_value(
-                strtopic, value, value_serializer)),
-            key_serializer=key_serializer,
-            value_serializer=value_serializer,
-            partition=partition,
-            callback=callback,
-        ))
-        return await self._send_future(fut)
+        if isinstance(channel, str):
+            channel = self.topic(channel)
+        return await channel.send(
+            key, value, partition,
+            key_serializer, value_serializer, callback,
+        )
 
     async def send_many(
             self, it: Iterable[Union[PendingMessage, Tuple]]) -> None:
@@ -559,7 +555,10 @@ class App(AppT, ServiceProxy):
             topic, key, value, partition,
             key_serializer, value_serializer, callback)
 
-    def send_soon(self, topic: Union[TopicT, str], key: K, value: V,
+    def send_soon(self,
+                  channel: Union[ChannelT, str],
+                  key: K = None,
+                  value: V = None,
                   partition: int = None,
                   key_serializer: CodecArg = None,
                   value_serializer: CodecArg = None,
@@ -569,7 +568,7 @@ class App(AppT, ServiceProxy):
         This is for use by non-async functions.
         """
         fut = FutureMessage(PendingMessage(
-            topic, key, value, partition,
+            channel, key, value, partition,
             key_serializer, value_serializer, callback,
         ))
         self._message_buffer.put(fut)
@@ -577,7 +576,7 @@ class App(AppT, ServiceProxy):
 
     def send_attached(self,
                       message: Message,
-                      topic: Union[str, TopicT],
+                      channel: Union[str, ChannelT],
                       key: K,
                       value: V,
                       partition: int = None,
@@ -586,7 +585,7 @@ class App(AppT, ServiceProxy):
                       callback: MessageSentCallback = None) -> FutureMessage:
         buf = self._pending_on_commit[message.tp]
         fut = FutureMessage(PendingMessage(
-            topic, key, value, partition,
+            channel, key, value, partition,
             key_serializer, value_serializer, callback))
         heappush(buf, (message.offset, Unordered(fut)))
         return fut
@@ -614,26 +613,6 @@ class App(AppT, ServiceProxy):
                 # we put it back and exit, as this was the smallest offset.
                 heappush(attached, entry)
                 break
-
-    async def _send_future(self, fut: FutureMessage) -> FutureMessage:
-        message: PendingMessage = fut.message
-        topic: str = cast(str, message.topic)
-        key: bytes = cast(bytes, message.key)
-        value: bytes = cast(bytes, message.value)
-        self.log.debug('send: topic=%r key=%r value=%r', topic, key, value)
-        assert topic is not None
-        producer = await self.maybe_start_producer()
-        state = await self.sensors.on_send_initiated(
-            producer, topic,
-            keysize=len(key) if key else 0,
-            valsize=len(value) if value else 0)
-        ret: RecordMetadata = await producer.send_and_wait(
-            topic, key, value, partition=message.partition)
-        fut.set_result(ret)
-        await self.sensors.on_send_completed(producer, state)
-        if message.callback:
-            await maybe_async(message.callback(fut))
-        return fut
 
     async def maybe_start_producer(self) -> ProducerT:
         producer = self.producer

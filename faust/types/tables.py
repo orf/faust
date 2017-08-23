@@ -4,9 +4,10 @@ import typing
 from typing import (
     Any, Callable, ClassVar, Iterable, MutableMapping, MutableSet, Type,
 )
+from .channels import EventT
 from .stores import StoreT
 from .streams import JoinableT
-from .topics import EventT, TopicT
+from .topics import TopicT
 from .tuples import TopicPartition
 from .windows import WindowT
 from ..utils.times import Seconds
