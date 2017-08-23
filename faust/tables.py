@@ -741,8 +741,8 @@ class TableManager(Service, TableManagerT, FastUserDict):
                     pass  # compacted offset?
                 else:
                     offsets[tp] = i
-                    key: K = await loads_key(key_type, entry['key'])
-                    value: V = await loads_value(value_type, entry['value'])
+                    key: K = loads_key(key_type, entry['key'])
+                    value: V = loads_value(value_type, entry['value'])
                     yield key, value
 
     async def table_update_from_iterable(
