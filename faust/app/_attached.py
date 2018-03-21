@@ -38,11 +38,11 @@ class Attachments:
     # The mapping maintains one list for each TopicPartition,
     # where the lists are used as heap queues containing tuples
     # of ``(source_message_offset, FutureMessage)``.
-    _pending: MutableMapping[TP, List[Attachment]]
+    _pending: MutableMapping[TP, MutableMapping[int, List[Attachment]]]
 
     def __init__(self, app: AppT) -> None:
         self.app = app
-        self._pending = defaultdict(list)
+        self._pending = defaultdict(lambda: defaultdict(list))
 
     async def maybe_put(self,
                         channel: Union[ChannelT, str],
@@ -104,14 +104,13 @@ class Attachments:
         # we wrap it in an Unordered object to stop heappush from crashing.
         # Unordered simply orders by random order, which is fine
         # since offsets are always unique.
-        heappush(buf, Attachment(message.offset, Unordered(fut)))
+        self._pending[message.tp][message.offset].append(fut)
         return fut
 
     async def commit(self, tp: TP, offset: int) -> None:
         # publish pending messages attached to this TP+offset
 
-        # make shallow copy to allow concurrent modifications (append)
-        attached = list(self._attachments_for(tp, offset))
+        attached = self._attachments_for(tp, offset)
         if attached:
             await asyncio.wait(
                 [
@@ -125,19 +124,4 @@ class Attachments:
     def _attachments_for(self, tp: TP,
                          commit_offset: int) -> Iterator[FutureMessage]:
         # Return attached messages for TopicPartition within committed offset.
-        attached = self._pending.get(tp)
-        while attached:
-            # get the entry with the smallest offset in this TP
-            entry = heappop(attached)
-
-            # if the entry offset is smaller or equal to the offset
-            # being committed
-            if entry[0] <= commit_offset:
-                # we use it by extracting the FutureMessage
-                # from Attachment tuple, where entry.message is
-                # Unordered[FutureMessage].
-                yield entry.message.value
-            else:
-                # else we put it back and exit (this was the smallest offset).
-                heappush(attached, entry)
-                break
+        return self._pending[tp].pop(commit_offset, None)
