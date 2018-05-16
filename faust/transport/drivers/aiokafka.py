@@ -702,7 +702,9 @@ class Transport(base.Transport):
                 timeout,
                 False,
             )
+            owner.log.info(f'-Sending request to {node_id}')
             response = await client.send(node_id, request)
+            owner.log.info(f'+Sending request to {node_id}')
             assert len(response.topic_error_codes), 'Single topic requested.'
 
             _, code, reason = response.topic_error_codes[0]
