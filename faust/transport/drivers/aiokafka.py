@@ -703,7 +703,8 @@ class Transport(base.Transport):
                 False,
             )
             owner.log.info(f'-Sending request to {node_id}')
-            response = await client.send(node_id, request)
+            response = await client.send(node_id, request,
+                                         verbose_logging=True)
             owner.log.info(f'+Sending request to {node_id}')
             assert len(response.topic_error_codes), 'Single topic requested.'
 
