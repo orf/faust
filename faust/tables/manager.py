@@ -7,6 +7,7 @@ from mode import Service
 from mode.utils.aiter import aiter
 from mode.utils.collections import FastUserDict
 from mode.utils.compat import Counter
+from mode.utils.logging import flight_recorder
 
 from faust.types import AppT, ChannelT, TP
 from faust.types.tables import (
@@ -278,10 +279,15 @@ class TableManager(Service, TableManagerT, FastUserDict):
 
     @Service.transitions_to(TABLEMAN_PARTITIONS_REVOKED)
     async def on_partitions_revoked(self, revoked: Set[TP]) -> None:
-        await self._maybe_abort_ongoing_recovery()
-        await self._stop_standbys()
-        for table in self.values():
-            await table.on_partitions_revoked(revoked)
+        with flight_recorder(self.log, timeout=60.0) as on_timeout:
+            on_timeout.info(f'Aborting ongoing recovery')
+            await self._maybe_abort_ongoing_recovery()
+            on_timeout.info(f'Stopping standbys')
+            await self._stop_standbys()
+            on_timeout.info(f'Calling on_partitions_revoked')
+            for table in self.values():
+                await table.on_partitions_revoked(revoked)
+            on_timeout.info(f'Done revoking')
 
     @Service.transitions_to(TABLEMAN_PARTITIONS_ASSIGNED)
     async def on_partitions_assigned(self, assigned: Set[TP]) -> None:
